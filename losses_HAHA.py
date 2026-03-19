@@ -63,7 +63,7 @@ class RotationAwarenessLoss(nn.Module):
     """
     无中心旋转感知约束（curl > divergence）
 
-    物理公式：L_rotation = mean(max(0, div - curl))
+    物理公式：L_rotation = mean(clamp(div - curl, min=0))
     其中：
         curl = ∂v/∂x - ∂u/∂y  （旋度：越大越像旋转）
         div  = ∂u/∂x + ∂v/∂y  （散度：越大越像膨胀/收缩）

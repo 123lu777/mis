@@ -6,8 +6,10 @@ os.environ["CUDA_VISIBLE_DEVICES"] = '0,1'
 import torch
 
 torch.backends.cudnn.benchmark = True
+torch.backends.cudnn.allow_tf32 = True   # 免费的 TF32 加速（4090/Ampere 架构）
 
 import torch.nn as nn
+from torch.cuda.amp import autocast, GradScaler
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
@@ -55,7 +57,8 @@ class Config:
     # 训练参数
     patch_size = 256  # [GoPro, HIDE, RealBlur]=256, [DPDD]=512
     num_epochs = 6000
-    batch_size = 8
+    # 双卡 4090（各 24GB）+ AMP FP16：batch_size=16（每卡 8 张），与原单卡 8 张等效但速度翻倍
+    batch_size = 16
     val_epochs = 10
     print_epochs = 2
 
@@ -96,7 +99,7 @@ num_epochs = args.num_epochs
 batch_size = args.batch_size
 val_epochs = args.val_epochs
 
-start_lr = 2e-4
+start_lr = 4e-4  # batch_size 8→16（×2），按线性缩放规则同步翻倍
 end_lr = 1e-6
 
 ######### Model ###########
@@ -173,6 +176,9 @@ if RESUME:
 if len(device_ids) > 1:
     model_restoration = nn.DataParallel(model_restoration, device_ids=device_ids)
 
+# AMP GradScaler：FP16 混合精度训练，在 4090 Tensor Core 上提速约 1.5-2×
+scaler = GradScaler()
+
 ######### Loss ###########
 criterion_char = losses.CharbonnierLoss()
 criterion_edge = losses.EdgeLoss()
@@ -180,12 +186,12 @@ criterion_fft = losses.fftLoss()
 
 ######### DataLoaders ###########
 train_dataset = get_training_data(train_dir, train_meta, {'patch_size': patch_size})
-train_loader = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, drop_last=False,
-                          pin_memory=True)
+train_loader = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True,
+                          num_workers=8, drop_last=True, pin_memory=True, prefetch_factor=4)
 
 val_dataset = get_validation_data(val_dir, val_meta, {'patch_size': patch_size})
-val_loader = DataLoader(dataset=val_dataset, batch_size=16, shuffle=False, num_workers=4, drop_last=False,
-                        pin_memory=True)
+val_loader = DataLoader(dataset=val_dataset, batch_size=16, shuffle=False,
+                        num_workers=8, drop_last=False, pin_memory=True, prefetch_factor=4)
 
 print('===> Start Epoch {} End Epoch {}'.format(start_epoch, num_epochs + 1))
 print('===> Loading datasets')
@@ -212,21 +218,26 @@ for epoch in range(start_epoch, num_epochs + 1):
         target_ = data[0].cuda()
         input_ = data[1].cuda()
         target = kornia.geometry.transform.build_pyramid(target_, 3)
-        restored, restored_inter, kernal_loss = model_restoration(input_)
 
-        loss_fft = criterion_fft(restored[0], target[0]) + criterion_fft(restored[1], target[1]) + criterion_fft(
-            restored[2], target[2])
-        loss_char = criterion_char(restored[0], target[0]) + criterion_char(restored[1], target[1]) + criterion_char(
-            restored[2], target[2])
-        loss_edge = criterion_edge(restored[0], target[0]) + criterion_edge(restored[1], target[1]) + criterion_edge(
-            restored[2], target[2])
-        loss_char_inter = criterion_char(restored_inter[0], target[0]) + criterion_char(restored_inter[1],
-                                                                                        target[1]) + criterion_char(
-            restored_inter[2], target[2])
+        # AMP 自动混合精度前向 + 损失计算
+        with autocast():
+            restored, restored_inter, kernal_loss = model_restoration(input_)
 
-        loss = loss_char + loss_char_inter + 0.01 * loss_fft + 0.05 * loss_edge + kernal_loss
-        loss.backward()
-        optimizer.step()
+            loss_fft = criterion_fft(restored[0], target[0]) + criterion_fft(restored[1], target[1]) + criterion_fft(
+                restored[2], target[2])
+            loss_char = criterion_char(restored[0], target[0]) + criterion_char(restored[1], target[1]) + criterion_char(
+                restored[2], target[2])
+            loss_edge = criterion_edge(restored[0], target[0]) + criterion_edge(restored[1], target[1]) + criterion_edge(
+                restored[2], target[2])
+            loss_char_inter = criterion_char(restored_inter[0], target[0]) + criterion_char(restored_inter[1],
+                                                                                            target[1]) + criterion_char(
+                restored_inter[2], target[2])
+
+            loss = loss_char + loss_char_inter + 0.01 * loss_fft + 0.05 * loss_edge + kernal_loss
+
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
         epoch_loss += loss.item()
         iter += 1
 
@@ -251,7 +262,7 @@ for epoch in range(start_epoch, num_epochs + 1):
             input_ = data_val[1].cuda()
 
             with torch.no_grad():
-                restored, _ = model_restoration(input_)
+                restored, _, _ = model_restoration(input_)
 
             for res, tar in zip(restored[0], target):
                 psnr_val_rgb.append(utils.torchPSNR(res, tar))
@@ -285,16 +296,9 @@ for epoch in range(start_epoch, num_epochs + 1):
                                                                                        scheduler.get_lr()[0]))
         f.write("------------------------------------------------------------------\n")
 
-    # =============================================
-    # 每轮都保存权重
-    # =============================================
-    torch.save({'epoch': epoch,
-                'state_dict': model_restoration.state_dict(),
-                'optimizer': optimizer.state_dict()
-                }, os.path.join(model_dir, f"model_epoch_{epoch}.pth"))
-
-    # 保存最新的权重（用于恢复训练）
-    torch.save({'epoch': epoch,
-                'state_dict': model_restoration.state_dict(),
-                'optimizer': optimizer.state_dict()
-                }, os.path.join(model_dir, "model_latest.pth"))
+    # 保存最新的权重（每 10 epoch 一次，避免磁盘 I/O 成为瓶颈）
+    if epoch % 10 == 0:
+        torch.save({'epoch': epoch,
+                    'state_dict': model_restoration.state_dict(),
+                    'optimizer': optimizer.state_dict()
+                    }, os.path.join(model_dir, "model_latest.pth"))
