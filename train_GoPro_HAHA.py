@@ -296,9 +296,14 @@ for epoch in range(start_epoch, num_epochs + 1):
                                                                                        scheduler.get_lr()[0]))
         f.write("------------------------------------------------------------------\n")
 
-    # 保存最新的权重（每 10 epoch 一次，避免磁盘 I/O 成为瓶颈）
-    if epoch % 10 == 0:
-        torch.save({'epoch': epoch,
-                    'state_dict': model_restoration.state_dict(),
-                    'optimizer': optimizer.state_dict()
-                    }, os.path.join(model_dir, "model_latest.pth"))
+    # 每轮保存权重
+    torch.save({'epoch': epoch,
+                'state_dict': model_restoration.state_dict(),
+                'optimizer': optimizer.state_dict()
+                }, os.path.join(model_dir, f"model_epoch_{epoch}.pth"))
+
+    # 保存最新的权重（用于恢复训练）
+    torch.save({'epoch': epoch,
+                'state_dict': model_restoration.state_dict(),
+                'optimizer': optimizer.state_dict()
+                }, os.path.join(model_dir, "model_latest.pth"))
