@@ -99,7 +99,7 @@ num_epochs = args.num_epochs
 batch_size = args.batch_size
 val_epochs = args.val_epochs
 
-start_lr = 3e-4  # batch_size 16→12（×0.75），按线性缩放规则同步调整
+start_lr = 3e-4  # 线性缩放规则：原始 batch_size=16 对应 4e-4，batch_size=12 → 4e-4×(12/16)=3e-4
 end_lr = 1e-6
 
 ######### Model ###########
@@ -144,7 +144,9 @@ if torch.cuda.device_count() > 1:
 optimizer = optim.Adam(model_restoration.parameters(), lr=start_lr, betas=(0.9, 0.999), eps=1e-8)
 
 ######### Scheduler ###########
-warmup_epochs = 3
+# 延长 warmup 至 10 个 epoch：LR 从 start_lr/10 逐步线性升至 start_lr，
+# 避免前几个 epoch 因 LR 跳变过快导致 FP16 梯度溢出（NaN loss）
+warmup_epochs = 10
 scheduler_cosine = optim.lr_scheduler.CosineAnnealingLR(optimizer, num_epochs - warmup_epochs, eta_min=end_lr)
 scheduler = GradualWarmupScheduler(optimizer, multiplier=1, total_epoch=warmup_epochs, after_scheduler=scheduler_cosine)
 
@@ -235,7 +237,17 @@ for epoch in range(start_epoch, num_epochs + 1):
 
             loss = loss_char + loss_char_inter + 0.01 * loss_fft + 0.05 * loss_edge + kernal_loss.mean()
 
+        # NaN/Inf 守卫：跳过损坏的 batch，防止 NaN 污染优化器状态
+        if not torch.isfinite(loss):
+            print(f'[WARN] epoch {epoch} iter {i}: loss={loss.item()}, skipping batch')
+            for param in model_restoration.parameters():
+                param.grad = None
+            continue
+
         scaler.scale(loss).backward()
+        # 梯度裁剪（unscale 后再 clip）：防止 FP16 混合精度下梯度爆炸引发 NaN
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model_restoration.parameters(), max_norm=0.5)
         scaler.step(optimizer)
         scaler.update()
         epoch_loss += loss.item()
