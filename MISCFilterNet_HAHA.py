@@ -510,7 +510,7 @@ class MISCKernelNet_HAHA(nn.Module):
             Kernal_Loss += self.rotation_aware_weight * self.rotation_loss(s1_kernal_flow)
             Kernal_Loss += self.flow_gradient_weight * self.gradient_loss(s1_kernal_flow)
 
-            return outputs[::-1], outputs_fil[::-1], Kernal_Loss
+            return tuple(outputs[::-1]), tuple(outputs_fil[::-1]), Kernal_Loss
         else:
             return out
 
