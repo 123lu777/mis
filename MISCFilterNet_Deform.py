@@ -294,15 +294,6 @@ class MISCKernelNet_Deform(nn.Module):
             BasicConv(base_channel * 2, kernel_size ** 2, kernel_size=3, relu=False, stride=1),
         ])
 
-    def _apply_kernel(self, x_input, posx, posy, alpha, beta, weight):
-        """Run FunctionKernel in float32 (kernel only supports float32) then restore dtype."""
-        dtype = x_input.dtype
-        out = self.moduleKernel(
-            x_input.float(), posx.float(), posy.float(),
-            alpha.float(), beta.float(), weight.float()
-        )
-        return out.to(dtype)
-
     def forward(self, x):
 
         x_2 = F.interpolate(x, scale_factor=0.5)
@@ -358,9 +349,9 @@ class MISCKernelNet_Deform(nn.Module):
         s3_kernal_posy = self.KernelOutkernely[0](z)
         z = self.feat_extract[3](z)
 
-        _x4_input = self.modulePad(torch.cat([x_4, x_4.new_ones(x_4.size(0), 1, x_4.size(2), x_4.size(3))], 1))
-        out3 = self._apply_kernel(
-            _x4_input, s3_kernal_posx, s3_kernal_posy, s3_kernal_alpha, s3_kernal_beta, s3_kernal_weight)
+        out3 = self.moduleKernel(
+            self.modulePad(torch.cat([x_4, x_4.new_ones(x_4.size(0), 1, x_4.size(2), x_4.size(3))], 1)), s3_kernal_posx,
+            s3_kernal_posy, s3_kernal_alpha, s3_kernal_beta, s3_kernal_weight)
         out3_norm = out3[:, -1:, :, :]
         out3_norm[out3_norm.abs() < 0.01] = 1.0
         out3 = out3[:, :-1, :, :] / out3_norm
@@ -404,9 +395,9 @@ class MISCKernelNet_Deform(nn.Module):
         s2_kernal_posy = self.KernelOutkernely[1](z)
         z = self.feat_extract[4](z)
 
-        _x2_input = self.modulePad(torch.cat([x_2, x_2.new_ones(x_2.size(0), 1, x_2.size(2), x_2.size(3))], 1))
-        out2 = self._apply_kernel(
-            _x2_input, s2_kernal_posx, s2_kernal_posy, s2_kernal_alpha, s2_kernal_beta, s2_kernal_weight)
+        out2 = self.moduleKernel(
+            self.modulePad(torch.cat([x_2, x_2.new_ones(x_2.size(0), 1, x_2.size(2), x_2.size(3))], 1)), s2_kernal_posx,
+            s2_kernal_posy, s2_kernal_alpha, s2_kernal_beta, s2_kernal_weight)
         out2_norm = out2[:, -1:, :, :]
         out2_norm[out2_norm.abs() < 0.01] = 1.0
         out2 = out2[:, :-1, :, :] / out2_norm
@@ -447,9 +438,8 @@ class MISCKernelNet_Deform(nn.Module):
         s1_kernal_posx = self.KernelOutkernelx[2](z)
         s1_kernal_posy = self.KernelOutkernely[2](z)
 
-        _x1_input = self.modulePad(torch.cat([x, x.new_ones(x.size(0), 1, x.size(2), x.size(3))], 1))
-        out = self._apply_kernel(
-            _x1_input, s1_kernal_posx, s1_kernal_posy, s1_kernal_alpha, s1_kernal_beta, s1_kernal_weight)
+        out = self.moduleKernel(self.modulePad(torch.cat([x, x.new_ones(x.size(0), 1, x.size(2), x.size(3))], 1)),
+                                s1_kernal_posx, s1_kernal_posy, s1_kernal_alpha, s1_kernal_beta, s1_kernal_weight)
         out_norm = out[:, -1:, :, :]
         out_norm[out_norm.abs() < 0.01] = 1.0
         out = out[:, :-1, :, :] / out_norm
