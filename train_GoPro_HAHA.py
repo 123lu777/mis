@@ -57,8 +57,8 @@ class Config:
     # 训练参数
     patch_size = 256  # [GoPro, HIDE, RealBlur]=256, [DPDD]=512
     num_epochs = 6000
-    # 双卡 GPU + AMP FP16：batch_size=8（每卡 4 张），显存占用更小，适合显存不足的情况
-    batch_size = 8
+    # 双卡 GPU + AMP FP16：batch_size=12（每卡 6 张），介于 8 与 16 之间，4 的倍数保证 GPU 对齐，GPU 利用率优于 8
+    batch_size = 12
     val_epochs = 10
     print_epochs = 2
 
@@ -99,7 +99,7 @@ num_epochs = args.num_epochs
 batch_size = args.batch_size
 val_epochs = args.val_epochs
 
-start_lr = 2e-4  # batch_size 16→8（÷2），按线性缩放规则同步减半
+start_lr = 3e-4  # batch_size 16→12（×0.75），按线性缩放规则同步调整
 end_lr = 1e-6
 
 ######### Model ###########
