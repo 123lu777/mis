@@ -247,8 +247,15 @@ for epoch in range(start_epoch, num_epochs + 1):
         scaler.scale(loss).backward()
         # 梯度裁剪（unscale 后再 clip）：防止 FP16 混合精度下梯度爆炸引发 NaN
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model_restoration.parameters(), max_norm=0.5)
-        scaler.step(optimizer)
+        grad_norm = torch.nn.utils.clip_grad_norm_(model_restoration.parameters(), max_norm=0.5)
+        # clip_grad_norm_ 返回未裁剪前的梯度 L2 范数；若为 NaN/Inf（梯度中含 NaN），
+        # GradScaler 的 found_inf 标志只检测 Inf 而不检测 NaN，因此需要手动跳过
+        if torch.isfinite(grad_norm):
+            scaler.step(optimizer)
+        else:
+            print(f'[WARN] epoch {epoch} iter {i}: grad_norm={grad_norm.item()}, skipping optimizer step')
+            for p in model_restoration.parameters():
+                p.grad = None
         scaler.update()
         epoch_loss += loss.item()
         iter += 1
