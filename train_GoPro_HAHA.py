@@ -233,7 +233,7 @@ for epoch in range(start_epoch, num_epochs + 1):
                                                                                             target[1]) + criterion_char(
                 restored_inter[2], target[2])
 
-            loss = loss_char + loss_char_inter + 0.01 * loss_fft + 0.05 * loss_edge + kernal_loss
+            loss = loss_char + loss_char_inter + 0.01 * loss_fft + 0.05 * loss_edge + kernal_loss.mean()
 
         scaler.scale(loss).backward()
         scaler.step(optimizer)
@@ -247,7 +247,7 @@ for epoch in range(start_epoch, num_epochs + 1):
             print('loss/fft_loss', loss_fft.item())
             print('loss/char_loss', loss_char.item())
             print('loss/edge_loss', loss_edge.item())
-            print('loss/kernal_loss', kernal_loss.item())
+            print('loss/kernal_loss', kernal_loss.mean().item())
             print('loss/iter_loss', loss.item())
 
     if epoch % args.print_epochs == 0:

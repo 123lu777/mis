@@ -335,7 +335,7 @@ class MISCKernelNet_HAHA(nn.Module):
 
         outputs_fil = list()
         outputs = list()
-        Kernal_Loss = 0
+        Kernal_Loss = torch.zeros(1, device=x.device)
 
         x_ = self.feat_extract[0](x)
         res1 = self.Encoder[0](x_)
