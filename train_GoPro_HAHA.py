@@ -9,7 +9,7 @@ torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.allow_tf32 = True   # 免费的 TF32 加速（4090/Ampere 架构）
 
 import torch.nn as nn
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
@@ -177,7 +177,7 @@ if len(device_ids) > 1:
     model_restoration = nn.DataParallel(model_restoration, device_ids=device_ids)
 
 # AMP GradScaler：FP16 混合精度训练，在 4090 Tensor Core 上提速约 1.5-2×
-scaler = GradScaler()
+scaler = GradScaler('cuda')
 
 ######### Loss ###########
 criterion_char = losses.CharbonnierLoss()
@@ -220,7 +220,7 @@ for epoch in range(start_epoch, num_epochs + 1):
         target = kornia.geometry.transform.build_pyramid(target_, 3)
 
         # AMP 自动混合精度前向 + 损失计算
-        with autocast():
+        with autocast('cuda'):
             restored, restored_inter, kernal_loss = model_restoration(input_)
 
             loss_fft = criterion_fft(restored[0], target[0]) + criterion_fft(restored[1], target[1]) + criterion_fft(

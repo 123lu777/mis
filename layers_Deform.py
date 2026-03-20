@@ -262,8 +262,8 @@ class ResBlock_Deform_fft_bench(nn.Module):
         y_f = torch.cat([y_real, y_imag], dim=dim)
         y = self.main_fft(y_f)
         y_real, y_imag = torch.chunk(y, 2, dim=dim)
-        y = torch.complex(y_real, y_imag)
-        y = torch.fft.irfft2(y, s=(H, W), norm=self.norm)
+        y = torch.complex(y_real.float(), y_imag.float())
+        y = torch.fft.irfft2(y, s=(H, W), norm=self.norm).to(x.dtype)
         return self.main(x) + x + y
 
 
@@ -294,13 +294,9 @@ class ResBlock_Deform_fft_bench_eval(nn.Module):
         y_f = torch.cat([y_real, y_imag], dim=dim)
         y = self.main_fft(y_f)
         y_real, y_imag = torch.chunk(y, 2, dim=dim)
-        y = torch.complex(y_real, y_imag)
-        y = torch.fft.irfft2(y, s=(H, W), norm=self.norm)
+        y = torch.complex(y_real.float(), y_imag.float())
+        y = torch.fft.irfft2(y, s=(H, W), norm=self.norm).to(x.dtype)
         return self.main(x) + x + y
-
-
-# =============================================
-# 原有模块保持不变
 # =============================================
 
 class BasicConv(nn.Module):
