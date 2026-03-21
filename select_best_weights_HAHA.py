@@ -4,6 +4,7 @@ import cv2
 import glob
 import math
 import shutil
+import time
 import torch
 import torch.nn as nn
 import numpy as np
@@ -77,6 +78,15 @@ class Config:
     # 是否包含 model_best.pth 和 model_latest.pth（若存在）
     # --------------------------------------------------
     include_special = True
+
+    # --------------------------------------------------
+    # 常量输出检测阈值
+    # 若某权重的三项指标均值都低于此阈值，视为该权重输出了
+    # 常量图像（全黑/全白）——通常是训练极早期尚未收敛的权重。
+    # 这类权重会被标记为 [常量输出]，从归一化基准和 Top-K 中排除。
+    # 若需关闭此检测，可将值设为 0.0。
+    # --------------------------------------------------
+    constant_output_threshold = 0.5
 # =============================================================================
 
 
@@ -229,7 +239,7 @@ def evaluate_checkpoint(model: nn.Module, weights_path: str,
         return {
             'weights': weights_path,
             'laplacian': 0.0, 'tenengrad': 0.0, 'brenner': 0.0,
-            'composite': 0.0, 'n_images': 0,
+            'composite': 0.0, 'n_images': 0, 'is_constant': True,
         }
 
     lap_list, ten_list, bre_list = [], [], []
@@ -246,13 +256,22 @@ def evaluate_checkpoint(model: nn.Module, weights_path: str,
             continue
 
     n = len(lap_list)
+    avg_lap = float(np.mean(lap_list)) if n > 0 else 0.0
+    avg_ten = float(np.mean(ten_list)) if n > 0 else 0.0
+    avg_bre = float(np.mean(bre_list)) if n > 0 else 0.0
+
+    # 常量输出检测：三项指标均低于阈值说明模型输出了全零/全常数图像
+    thr = cfg.constant_output_threshold
+    is_constant = (avg_lap <= thr and avg_ten <= thr and avg_bre <= thr)
+
     return {
-        'weights':   weights_path,
-        'laplacian': float(np.mean(lap_list)) if n > 0 else 0.0,
-        'tenengrad': float(np.mean(ten_list)) if n > 0 else 0.0,
-        'brenner':   float(np.mean(bre_list)) if n > 0 else 0.0,
-        'composite': 0.0,   # 将在所有权重评估完后统一计算
-        'n_images':  n,
+        'weights':     weights_path,
+        'laplacian':   avg_lap,
+        'tenengrad':   avg_ten,
+        'brenner':     avg_bre,
+        'composite':   0.0,   # 将在所有权重评估完后统一计算
+        'n_images':    n,
+        'is_constant': is_constant,
     }
 
 
@@ -263,25 +282,47 @@ def compute_composite_scores(results: list, cfg: Config):
     """
     对 results 中三项指标做 Min-Max 归一化（[0,1]），
     按配置权重加权后写入 composite 字段。
+
+    归一化基准仅使用"有效"权重（非常量输出）。
+    常量输出权重的 composite 固定为 0.0，排名自然垫底。
     """
-    def _normalize(vals, name):
-        mn, mx = min(vals), max(vals)
+    valid = [r for r in results if not r.get('is_constant', False)]
+    if not valid:
+        # 全部都是常量输出（极端情况），退化为全量归一化
+        valid = results
+
+    def _normalize_with_ref(vals_all, ref_vals, name):
+        """用 ref_vals 计算 min/max，对 vals_all 做归一化。"""
+        mn, mx = min(ref_vals), max(ref_vals)
         if mx - mn < 1e-12:
-            print(f"  ⚠ 指标 [{name}] 在所有权重上几乎相同（range={mx-mn:.2e}），归一化后统一为 0.5")
-            return [0.5] * len(vals)
-        return [(v - mn) / (mx - mn) for v in vals]
+            print(f"  ⚠ 指标 [{name}] 在所有有效权重上几乎相同（range={mx-mn:.2e}），归一化后统一为 0.5")
+            # 有效权重统一给 0.5，常量输出给 0.0
+            return [0.5 if not r.get('is_constant', False) else 0.0
+                    for r in results]
+        return [
+            0.0 if r.get('is_constant', False)
+            else max(0.0, (v - mn) / (mx - mn))
+            for r, v in zip(results, vals_all)
+        ]
 
     lap_vals = [r['laplacian'] for r in results]
     ten_vals = [r['tenengrad'] for r in results]
     bre_vals = [r['brenner']   for r in results]
 
-    lap_norm = _normalize(lap_vals, 'laplacian')
-    ten_norm = _normalize(ten_vals, 'tenengrad')
-    bre_norm = _normalize(bre_vals, 'brenner')
+    lap_ref = [r['laplacian'] for r in valid]
+    ten_ref = [r['tenengrad'] for r in valid]
+    bre_ref = [r['brenner']   for r in valid]
+
+    lap_norm = _normalize_with_ref(lap_vals, lap_ref, 'laplacian')
+    ten_norm = _normalize_with_ref(ten_vals, ten_ref, 'tenengrad')
+    bre_norm = _normalize_with_ref(bre_vals, bre_ref, 'brenner')
 
     wl, wt, wb = cfg.weight_laplacian, cfg.weight_tenengrad, cfg.weight_brenner
     for i, r in enumerate(results):
-        r['composite'] = wl * lap_norm[i] + wt * ten_norm[i] + wb * bre_norm[i]
+        if r.get('is_constant', False):
+            r['composite'] = 0.0
+        else:
+            r['composite'] = wl * lap_norm[i] + wt * ten_norm[i] + wb * bre_norm[i]
 
 
 # ---------------------------------------------------------------------------
@@ -336,36 +377,63 @@ def main():
 
     # ---- 4. 逐权重评估 ----
     results = []
+    t_start_all = time.time()
     for idx, wf in enumerate(weight_files, 1):
         name = os.path.basename(wf)
-        print(f"[{idx:>3}/{len(weight_files)}] 评估: {name}")
+        print(f"[{idx:>3}/{len(weight_files)}] 评估: {name}", end='', flush=True)
+        t0 = time.time()
         r = evaluate_checkpoint(model, wf, image_files, cfg, device)
+        elapsed = time.time() - t0
         results.append(r)
-        print(f"        Laplacian={r['laplacian']:.2f}  "
-              f"Tenengrad={r['tenengrad']:.2f}  "
-              f"Brenner={r['brenner']:.2f}  "
-              f"(图像数={r['n_images']})")
+
+        # 每次评估后重新计算 ETA
+        avg_sec = (time.time() - t_start_all) / idx
+        remaining = len(weight_files) - idx
+        eta_min = avg_sec * remaining / 60.0
+
+        if r.get('is_constant', False):
+            print(f"\n        ⚠ [常量输出] 该权重推理结果为全零/常数图像，将排除于归一化和 Top-K"
+                  f"  (耗时{elapsed:.1f}s, 预计剩余{eta_min:.1f}分)")
+        else:
+            print(f"\n        Laplacian={r['laplacian']:.2f}  "
+                  f"Tenengrad={r['tenengrad']:.2f}  "
+                  f"Brenner={r['brenner']:.2f}  "
+                  f"(图像数={r['n_images']}, 耗时{elapsed:.1f}s, 预计剩余{eta_min:.1f}分)")
 
     # ---- 5. 计算综合得分并排序 ----
     compute_composite_scores(results, cfg)
     results.sort(key=lambda x: x['composite'], reverse=True)
 
-    # ---- 6. 打印结果表格 ----
+    n_constant = sum(1 for r in results if r.get('is_constant', False))
+    n_valid = len(results) - n_constant
     print(f"\n{'=' * 65}")
-    hdr = f"{'排名':<5} {'权重文件名':<38} {'综合':<8} {'拉普拉斯':<12} {'Tenengrad':<12} {'Brenner':<10} {'图像'}"
+    print(f"有效权重: {n_valid} 个  |  常量输出（已排除归一化）: {n_constant} 个")
+
+    # ---- 6. 打印结果表格 ----
+    print(f"{'=' * 65}")
+    hdr = f"{'排名':<5} {'权重文件名':<38} {'综合':<8} {'拉普拉斯':<12} {'Tenengrad':<12} {'Brenner':<10} {'备注'}"
     print(hdr)
     print('-' * len(hdr))
-    for rank, r in enumerate(results, 1):
+    rank_valid = 0
+    for r in results:
         name = os.path.basename(r['weights'])
-        flag = " ★" if rank <= cfg.top_k else ""
-        print(
-            f"{rank:<5} {name:<38} {r['composite']:.4f}  "
-            f"{r['laplacian']:<12.2f} {r['tenengrad']:<12.2f} "
-            f"{r['brenner']:<10.2f} {r['n_images']}{flag}"
-        )
+        if r.get('is_constant', False):
+            print(
+                f"{'--':<5} {name:<38} {'--':<8} "
+                f"{'--':<12} {'--':<12} {'--':<10} [常量输出]"
+            )
+        else:
+            rank_valid += 1
+            flag = " ★" if rank_valid <= cfg.top_k else ""
+            print(
+                f"{rank_valid:<5} {name:<38} {r['composite']:.4f}  "
+                f"{r['laplacian']:<12.2f} {r['tenengrad']:<12.2f} "
+                f"{r['brenner']:<10.2f}{flag}"
+            )
 
-    # ---- 7. 复制 Top-K 权重 ----
-    top_results = results[:cfg.top_k]
+    # ---- 7. 复制 Top-K 权重（跳过常量输出） ----
+    valid_results = [r for r in results if not r.get('is_constant', False)]
+    top_results = valid_results[:cfg.top_k]
 
     if cfg.output_dir:
         os.makedirs(cfg.output_dir, exist_ok=True)
@@ -378,7 +446,7 @@ def main():
             print(f"  [{rank}] {os.path.basename(src)}  综合={r['composite']:.4f}")
 
     # ---- 8. 最终推荐 ----
-    best = results[0]
+    best = valid_results[0] if valid_results else results[0]
     print(f"\n{'=' * 65}")
     print(f"🏆 最优权重: {os.path.basename(best['weights'])}")
     print(f"   综合得分 = {best['composite']:.4f}")
@@ -392,12 +460,21 @@ def main():
     csv_path = os.path.join(ckpt_dir, 'weight_selection_results.csv')
     try:
         with open(csv_path, 'w', encoding='utf-8') as f:
-            f.write('rank,weights_file,composite_score,laplacian,tenengrad,brenner,n_images\n')
-            for rank, r in enumerate(results, 1):
+            f.write('rank,weights_file,composite_score,laplacian,tenengrad,brenner,n_images,is_constant\n')
+            rank_valid = 0
+            for r in results:
+                if r.get('is_constant', False):
+                    rank_str = ''
+                    comp_str = ''
+                else:
+                    rank_valid += 1
+                    rank_str = str(rank_valid)
+                    comp_str = f"{r['composite']:.6f}"
                 f.write(
-                    f"{rank},{os.path.basename(r['weights'])},"
-                    f"{r['composite']:.6f},{r['laplacian']:.4f},"
-                    f"{r['tenengrad']:.4f},{r['brenner']:.4f},{r['n_images']}\n"
+                    f"{rank_str},{os.path.basename(r['weights'])},"
+                    f"{comp_str},{r['laplacian']:.4f},"
+                    f"{r['tenengrad']:.4f},{r['brenner']:.4f},"
+                    f"{r['n_images']},{int(r.get('is_constant', False))}\n"
                 )
         print(f"📊 评估结果已保存到: {csv_path}")
     except Exception as e:
