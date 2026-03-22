@@ -117,10 +117,11 @@ def resize_cv2(img: np.ndarray, size: tuple) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # 权重加载（兼容 DataParallel / 单 GPU 保存）
 # ---------------------------------------------------------------------------
-def load_checkpoint_fixed(model: nn.Module, weights_path: str, device: torch.device):
+def load_checkpoint_fixed(model: nn.Module, weights_path: str, device: torch.device) -> int:
     """
     加载权重到 model（strict=False，自动过滤形状不匹配的键）。
     同时处理 'module.' 前缀。
+    返回成功匹配的层数。
     """
     checkpoint = torch.load(weights_path, map_location=device)
     state_dict = checkpoint.get('state_dict', checkpoint)
@@ -130,16 +131,17 @@ def load_checkpoint_fixed(model: nn.Module, weights_path: str, device: torch.dev
     for k, v in state_dict.items():
         stripped[k.replace('module.', '')] = v
 
-    model_dict = model.state_dict()
+    # 始终使用底层模型（无 'module.' 前缀）比对键名，
+    # 避免 DataParallel 包装后 model.state_dict() 的键多出 'module.' 导致全部不匹配
+    base_model = model.module if isinstance(model, nn.DataParallel) else model
+    model_dict = base_model.state_dict()
     matched = OrderedDict(
         (k, v) for k, v in stripped.items()
         if k in model_dict and v.shape == model_dict[k].shape
     )
 
-    if isinstance(model, nn.DataParallel):
-        model.module.load_state_dict(matched, strict=False)
-    else:
-        model.load_state_dict(matched, strict=False)
+    base_model.load_state_dict(matched, strict=False)
+    return len(matched)
 
 
 # ---------------------------------------------------------------------------
@@ -151,11 +153,13 @@ class CheckpointDeblurrer:
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model: nn.Module = None
 
-    def setup_model(self, weights_path: str):
-        """构建 HAHA 模型并加载指定权重。"""
+    def setup_model(self, weights_path: str) -> int:
+        """构建 HAHA 模型并加载指定权重。返回匹配的层数。"""
         cfg = self.cfg
+        # ★ 推理时使用 inference=True：forward 直接返回单张张量，
+        #   无需多尺度列表解包，也不计算 Kernal_Loss，速度更快
         model = myNet(
-            inference=False,
+            inference=True,
             use_deform_in_feat=cfg.use_deform_in_feat,
             use_deform_in_encoder=cfg.use_deform_in_encoder,
             rigid_smooth_weight=cfg.rigid_smooth_weight,
@@ -169,14 +173,16 @@ class CheckpointDeblurrer:
         else:
             model = model.to(self.device)
 
-        load_checkpoint_fixed(model, weights_path, self.device)
+        n_matched = load_checkpoint_fixed(model, weights_path, self.device)
         model.eval()
         self.model = model
+        return n_matched
 
     def infer(self, img_rgb: np.ndarray) -> np.ndarray:
         """
         对 img_rgb（uint8 RGB）运行 HAHA 推理，返回去模糊结果（uint8 RGB）。
         推理时使用 window_partitionx / window_reversex 以支持任意分辨率。
+        模型以 inference=True 模式运行，forward 直接返回单张输出张量。
         """
         inp_np = img_rgb.astype(np.float32) / 255.0
         inp_t  = torch.from_numpy(inp_np).permute(2, 0, 1).unsqueeze(0).to(self.device)
@@ -186,9 +192,8 @@ class CheckpointDeblurrer:
 
         with torch.no_grad():
             input_re, batch_list = window_partitionx(inp_t, win_size)
-            # HAHA forward 返回 (outputs, outputs_fil, Kernal_Loss)
-            restored, _, _ = self.model(input_re)
-            restored = restored[0]
+            # inference=True 时 forward 直接返回单张输出张量 [B, C, H, W]
+            restored = self.model(input_re)
             restored = window_reversex(restored, win_size, H, W, batch_list)
             restored = torch.clamp(restored, 0, 1)
 
@@ -290,7 +295,11 @@ def evaluate_all_weights():
 
         try:
             deblurrer = CheckpointDeblurrer(cfg)
-            deblurrer.setup_model(wpath)
+            n_matched = deblurrer.setup_model(wpath)
+
+            if n_matched == 0:
+                print(f"\n   ❌ 权重加载失败: 没有任何层匹配！请检查模型结构与权重文件。跳过。\n")
+                continue
 
             restored = deblurrer.infer(blur_infer)
 
