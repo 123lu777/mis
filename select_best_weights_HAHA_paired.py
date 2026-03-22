@@ -57,10 +57,12 @@ class Config:
     # 推理分辨率
     #   infer_size  —— 模型推理时的图像尺寸（正方形边长，建议 512）
     #   output_size —— 将模型输出放大到此尺寸后再与参考图对比
-    #                  若参考图与模糊图同尺寸，可设为 None（不缩放）
+    #                  设为 (W, H) 可固定缩放尺寸；设为 None 则自动匹配参考图尺寸
+    #   ★ 若参考图为 1024×1024，保持默认 (1024, 1024) 即可。
+    #     若参考图为其他分辨率，修改此处或改为 None（自动对齐）。
     # --------------------------------------------------
     infer_size  = 512
-    output_size = None    # 例：(1024, 1024) 或 None
+    output_size = (1024, 1024)    # 固定放大到 1024×1024 后再比较；改为 None 则自动匹配参考图
 
     # --------------------------------------------------
     # epoch 评估区间（含端点）
@@ -231,10 +233,22 @@ def evaluate_all_weights():
     ref_image   = read_image_rgb(cfg.ref_image_path)
     blur_image  = read_image_rgb(cfg.blur_image_path)
 
+    ref_h, ref_w = ref_image.shape[:2]
+    blur_h, blur_w = blur_image.shape[:2]
+    print(f"\n📷 参考图尺寸: {ref_w}×{ref_h}  |  模糊图尺寸: {blur_w}×{blur_h}")
+    if cfg.output_size is not None:
+        cmp_w, cmp_h = cfg.output_size
+        print(f"📐 推理输出将放大到 {cmp_w}×{cmp_h} 后与参考图对比")
+        if (ref_h, ref_w) != (cmp_h, cmp_w):
+            print(f"   ⚠ 注意：参考图尺寸 {ref_w}×{ref_h} 与对比尺寸 {cmp_w}×{cmp_h} 不一致，"
+                  f"请确认 ref_image_path 是否为正确的对应清晰图像！")
+    else:
+        print(f"📐 推理输出将自动缩放到参考图尺寸 {ref_w}×{ref_h} 后对比")
+
     # 将模糊图缩放到推理分辨率
     infer_hw = (cfg.infer_size, cfg.infer_size)
     blur_infer = resize_cv2(blur_image, infer_hw)
-    print(f"\n📐 模糊图已缩放到 {cfg.infer_size}×{cfg.infer_size} 进行推理")
+    print(f"   模糊图已缩放到 {cfg.infer_size}×{cfg.infer_size} 进行推理")
 
     # ---- 2. 收集并过滤权重文件 ----
     if not os.path.isdir(cfg.checkpoints_dir):
@@ -280,13 +294,16 @@ def evaluate_all_weights():
 
             restored = deblurrer.infer(blur_infer)
 
-            # 将输出缩放到与参考图对齐的分辨率
+            # 将输出放大到指定尺寸后再与参考图对比
             if cfg.output_size is not None:
+                cmp_w, cmp_h = cfg.output_size
                 restored_cmp = resize_cv2(restored, cfg.output_size)
+                print(f"\n   📐 推理输出已放大到 {cmp_w}×{cmp_h} 以对齐参考图", end='', flush=True)
             elif restored.shape[:2] != ref_image.shape[:2]:
                 # 自动匹配参考图尺寸 (H, W) → cv2 需要 (W, H)
                 h, w = ref_image.shape[:2]
                 restored_cmp = resize_cv2(restored, (w, h))
+                print(f"\n   📐 推理输出已自动缩放到 {w}×{h} 以对齐参考图", end='', flush=True)
             else:
                 restored_cmp = restored
 
