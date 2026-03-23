@@ -254,16 +254,22 @@ class ResBlock_Deform_fft_bench(nn.Module):
         self.norm = norm
 
     def forward(self, x):
+        x_dtype = x.dtype
         _, _, H, W = x.shape
         dim = 1
-        y = torch.fft.rfft2(x, norm=self.norm)
+        x_f32 = x.float()
+        y = torch.fft.rfft2(x_f32, norm=self.norm)
         y_imag = y.imag
         y_real = y.real
         y_f = torch.cat([y_real, y_imag], dim=dim)
-        y = self.main_fft(y_f)
+        # Keep FFT branch in FP32: norm='backward' FFT coefficients for a 256×256
+        # patch can reach ~32 768 (≈ FP16 max), so running main_fft in FP16 causes
+        # overflow → Inf/NaN.  autocast(enabled=False) forces FP32 for these convs.
+        with torch.autocast(device_type='cuda', enabled=False):
+            y = self.main_fft(y_f.float()).float()
         y_real, y_imag = torch.chunk(y, 2, dim=dim)
         y = torch.complex(y_real, y_imag)
-        y = torch.fft.irfft2(y, s=(H, W), norm=self.norm)
+        y = torch.fft.irfft2(y, s=(H, W), norm=self.norm).to(x_dtype)
         return self.main(x) + x + y
 
 
@@ -286,21 +292,20 @@ class ResBlock_Deform_fft_bench_eval(nn.Module):
         self.norm = norm
 
     def forward(self, x):
+        x_dtype = x.dtype
         _, _, H, W = x.shape
         dim = 1
-        y = torch.fft.rfft2(x, norm=self.norm)
+        x_f32 = x.float()
+        y = torch.fft.rfft2(x_f32, norm=self.norm)
         y_imag = y.imag
         y_real = y.real
         y_f = torch.cat([y_real, y_imag], dim=dim)
-        y = self.main_fft(y_f)
+        with torch.autocast(device_type='cuda', enabled=False):
+            y = self.main_fft(y_f.float()).float()
         y_real, y_imag = torch.chunk(y, 2, dim=dim)
         y = torch.complex(y_real, y_imag)
-        y = torch.fft.irfft2(y, s=(H, W), norm=self.norm)
+        y = torch.fft.irfft2(y, s=(H, W), norm=self.norm).to(x_dtype)
         return self.main(x) + x + y
-
-
-# =============================================
-# 原有模块保持不变
 # =============================================
 
 class BasicConv(nn.Module):
@@ -460,14 +465,16 @@ class ResBlock_fft_bench(nn.Module):
     def forward(self, x):
         _, _, H, W = x.shape  # 修正：去掉多余的空格
         dim = 1
-        y = torch.fft.rfft2(x, norm=self.norm)  # 修正：去掉多余的空格
+        x_f32 = x.float()  # Ensure FP32 input to FFT to prevent overflow
+        y = torch.fft.rfft2(x_f32, norm=self.norm)  # 修正：去掉多余的空格
         y_imag = y.imag
         y_real = y.real
         y_f = torch.cat([y_real, y_imag], dim=dim)  # 修正：去掉多余的空格
-        y = self.main_fft(y_f)
+        with torch.autocast(device_type='cuda', enabled=False):
+            y = self.main_fft(y_f.float()).float()
         y_real, y_imag = torch.chunk(y, 2, dim=dim)
         y = torch.complex(y_real, y_imag)
-        y = torch.fft.irfft2(y, s=(H, W), norm=self.norm)  # 修正：去掉多余的空格
+        y = torch.fft.irfft2(y, s=(H, W), norm=self.norm).to(x.dtype)  # 修正：去掉多余的空格
         return self.main(x) + x + y
 
 
@@ -488,14 +495,16 @@ class ResBlock_do_fft_bench(nn.Module):
     def forward(self, x):
         _, _, H, W = x.shape
         dim = 1
-        y = torch.fft.rfft2(x, norm=self.norm)
+        x_f32 = x.float()  # Ensure FP32 input to FFT to prevent overflow
+        y = torch.fft.rfft2(x_f32, norm=self.norm)
         y_imag = y.imag
         y_real = y.real
         y_f = torch.cat([y_real, y_imag], dim=dim)
-        y = self.main_fft(y_f)
+        with torch.autocast(device_type='cuda', enabled=False):
+            y = self.main_fft(y_f.float()).float()
         y_real, y_imag = torch.chunk(y, 2, dim=dim)
         y = torch.complex(y_real, y_imag)
-        y = torch.fft.irfft2(y, s=(H, W), norm=self.norm)
+        y = torch.fft.irfft2(y, s=(H, W), norm=self.norm).to(x.dtype)
         return self.main(x) + x + y
 
 
@@ -516,14 +525,16 @@ class ResBlock_do_fft_bench_eval(nn.Module):
     def forward(self, x):
         _, _, H, W = x.shape
         dim = 1
-        y = torch.fft.rfft2(x, norm=self.norm)
+        x_f32 = x.float()  # Ensure FP32 input to FFT to prevent overflow
+        y = torch.fft.rfft2(x_f32, norm=self.norm)
         y_imag = y.imag
         y_real = y.real
         y_f = torch.cat([y_real, y_imag], dim=dim)
-        y = self.main_fft(y_f)
+        with torch.autocast(device_type='cuda', enabled=False):
+            y = self.main_fft(y_f.float()).float()
         y_real, y_imag = torch.chunk(y, 2, dim=dim)
         y = torch.complex(y_real, y_imag)
-        y = torch.fft.irfft2(y, s=(H, W), norm=self.norm)
+        y = torch.fft.irfft2(y, s=(H, W), norm=self.norm).to(x.dtype)
         return self.main(x) + x + y
 
 
