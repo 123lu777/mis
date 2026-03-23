@@ -47,6 +47,7 @@ class Config:
     rigid_smooth_weight   = 0.05
     rotation_aware_weight = 0.03
     flow_gradient_weight  = 0.02
+    curl_smooth_weight    = 0.04
 
     # --------------------------------------------------
     # 推理窗口大小
@@ -165,12 +166,13 @@ def collect_images(input_dir: str, max_n=None) -> list:
 def build_model(cfg: Config, device: torch.device) -> nn.Module:
     """构建 HAHA 模型（不加载权重，只构建一次后复用）"""
     model = myNet(
-        inference=False,
+        inference=True,
         use_deform_in_feat=cfg.use_deform_in_feat,
         use_deform_in_encoder=cfg.use_deform_in_encoder,
         rigid_smooth_weight=cfg.rigid_smooth_weight,
         rotation_aware_weight=cfg.rotation_aware_weight,
         flow_gradient_weight=cfg.flow_gradient_weight,
+        curl_smooth_weight=cfg.curl_smooth_weight,
     )
     if device.type == 'cuda':
         model = model.cuda()
@@ -212,8 +214,7 @@ def infer_single(model: nn.Module, image_path: str,
     with torch.no_grad():
         input_re, batch_list = window_partitionx(inp_t, win_size)
         # HAHA forward 返回三元组：(outputs, outputs_fil, Kernal_Loss)
-        restored, _, _ = model(input_re)
-        restored = restored[0]
+        restored = model(input_re)
         restored = window_reversex(restored, win_size, H, W, batch_list)
         restored = torch.clamp(restored, 0, 1)
 

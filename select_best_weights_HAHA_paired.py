@@ -80,6 +80,7 @@ class Config:
     rigid_smooth_weight   = 0.05
     rotation_aware_weight = 0.03
     flow_gradient_weight  = 0.02
+    curl_smooth_weight    = 0.04
 
     # --------------------------------------------------
     # 综合得分公式权重（与 MHG 版保持一致）
@@ -165,6 +166,7 @@ class CheckpointDeblurrer:
             rigid_smooth_weight=cfg.rigid_smooth_weight,
             rotation_aware_weight=cfg.rotation_aware_weight,
             flow_gradient_weight=cfg.flow_gradient_weight,
+            curl_smooth_weight=cfg.curl_smooth_weight,
         )
 
         if self.device.type == 'cuda':

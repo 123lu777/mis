@@ -9,7 +9,7 @@ MISCFilterNet with Deformable Convolution + Physical Prior Constraints (HAHA)
 
 物理约束：
 - 刚性平滑：L_smooth = Σ(|∇u| + |∇v|)
-- 旋转感知：L_rotation = max(0, div - curl)
+- 旋转感知：L_rotation = max(0, |div| - |curl|)，支持顺/逆时针旋转
 - 梯度平滑：L_gradient = Σ(|∇²u| + |∇²v|)
 """
 
@@ -21,7 +21,8 @@ from models.layers_Deform import *
 from torch.nn.utils import weight_norm
 import models.MISCKernel_cuda as misckernel
 
-from losses_HAHA import RigidMotionSmoothnessLoss, RotationAwarenessLoss, FlowGradientSmoothnessLoss
+from losses_HAHA import (RigidMotionSmoothnessLoss, RotationAwarenessLoss,
+                         FlowGradientSmoothnessLoss, CurlSmoothnessLoss)
 
 
 class EBlock_Deform(nn.Module):
@@ -164,6 +165,7 @@ class MISCKernelNet_HAHA(nn.Module):
                  rigid_smooth_weight=0.05,
                  rotation_aware_weight=0.03,
                  flow_gradient_weight=0.02,
+                 curl_smooth_weight=0.04,
                  ):
         super(MISCKernelNet_HAHA, self).__init__()
         self.inference = inference
@@ -175,6 +177,7 @@ class MISCKernelNet_HAHA(nn.Module):
         self.rigid_smooth_weight = rigid_smooth_weight
         self.rotation_aware_weight = rotation_aware_weight
         self.flow_gradient_weight = flow_gradient_weight
+        self.curl_smooth_weight = curl_smooth_weight
 
         # =============================================
         # 物理先验约束损失函数实例
@@ -182,6 +185,9 @@ class MISCKernelNet_HAHA(nn.Module):
         self.rigid_loss = RigidMotionSmoothnessLoss()
         self.rotation_loss = RotationAwarenessLoss()
         self.gradient_loss = FlowGradientSmoothnessLoss()
+        # 旋度平滑：刚体旋转角速度ω恒定 → curl=2ω 全场均匀
+        # 比 rigid_loss 更适合风机：不惩罚合理的径向速度梯度
+        self.curl_smooth_loss = CurlSmoothnessLoss()
 
         # 根据模式选择卷积类型
         if not inference:
@@ -406,6 +412,8 @@ class MISCKernelNet_HAHA(nn.Module):
             Kernal_Loss += self.rigid_smooth_weight * self.rigid_loss(s3_kernal_flow)
             Kernal_Loss += self.rotation_aware_weight * self.rotation_loss(s3_kernal_flow)
             Kernal_Loss += self.flow_gradient_weight * self.gradient_loss(s3_kernal_flow)
+            # 旋度平滑：刚体旋转时 curl=2ω 应全场均匀，比 rigid_loss 更适合风机叶片
+            Kernal_Loss += self.curl_smooth_weight * self.curl_smooth_loss(s3_kernal_flow)
 
         z = torch.cat([z, res2], dim=1)
         z = self.Convs[0](z)
@@ -459,6 +467,7 @@ class MISCKernelNet_HAHA(nn.Module):
             Kernal_Loss += self.rigid_smooth_weight * self.rigid_loss(s2_kernal_flow)
             Kernal_Loss += self.rotation_aware_weight * self.rotation_loss(s2_kernal_flow)
             Kernal_Loss += self.flow_gradient_weight * self.gradient_loss(s2_kernal_flow)
+            Kernal_Loss += self.curl_smooth_weight * self.curl_smooth_loss(s2_kernal_flow)
 
         z = torch.cat([z, res1], dim=1)
         z = self.Convs[1](z)
@@ -509,6 +518,7 @@ class MISCKernelNet_HAHA(nn.Module):
             Kernal_Loss += self.rigid_smooth_weight * self.rigid_loss(s1_kernal_flow)
             Kernal_Loss += self.rotation_aware_weight * self.rotation_loss(s1_kernal_flow)
             Kernal_Loss += self.flow_gradient_weight * self.gradient_loss(s1_kernal_flow)
+            Kernal_Loss += self.curl_smooth_weight * self.curl_smooth_loss(s1_kernal_flow)
 
             return tuple(outputs[::-1]), tuple(outputs_fil[::-1]), Kernal_Loss
         else:
@@ -530,12 +540,13 @@ def build_MISCKernelNet_HAHA(inference=False, **kwargs):
         # 推理模式
         model = build_MISCKernelNet_HAHA(inference=True)
 
-        # 自定义物理约束权重
+        # 自定义物理约束权重（风机场景推荐：增大 curl_smooth，减小 rigid_smooth）
         model = build_MISCKernelNet_HAHA(
             inference=False,
-            rigid_smooth_weight=0.05,
+            rigid_smooth_weight=0.02,   # 降低：风机流场有自然的径向速度梯度，不应过度惩罚
             rotation_aware_weight=0.03,
-            flow_gradient_weight=0.02
+            flow_gradient_weight=0.02,
+            curl_smooth_weight=0.06,    # 升高：刚体旋转 curl=2ω 应均匀，是最直接的风机约束
         )
     """
     return MISCKernelNet_HAHA(inference=inference, **kwargs)

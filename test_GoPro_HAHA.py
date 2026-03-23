@@ -44,7 +44,8 @@ class IterativeDeblurrer:
                     use_deform_in_encoder=True,
                     rigid_smooth_weight=0.05,
                     rotation_aware_weight=0.03,
-                    flow_gradient_weight=0.02):
+                    flow_gradient_weight=0.02,
+                    curl_smooth_weight=0.04):
         """
         初始化带物理先验约束的 HAHA 模型
 
@@ -55,14 +56,16 @@ class IterativeDeblurrer:
         - rigid_smooth_weight:    刚性运动平滑约束权重（需与训练时一致）
         - rotation_aware_weight:  旋转感知约束权重（需与训练时一致）
         - flow_gradient_weight:   流梯度平滑约束权重（需与训练时一致）
+        - curl_smooth_weight:     旋度平滑约束权重（需与训练时一致）
         """
         model_restoration = myNet(
-            inference=False,
+            inference=True,
             use_deform_in_feat=use_deform_in_feat,
             use_deform_in_encoder=use_deform_in_encoder,
             rigid_smooth_weight=rigid_smooth_weight,
             rotation_aware_weight=rotation_aware_weight,
             flow_gradient_weight=flow_gradient_weight,
+            curl_smooth_weight=curl_smooth_weight,
         )
 
         # 打印模型参数量
@@ -75,7 +78,8 @@ class IterativeDeblurrer:
         print(f"=== 可变形卷积配置: feat={use_deform_in_feat}, encoder={use_deform_in_encoder}")
         print(f"=== 物理先验权重: rigid_smooth={rigid_smooth_weight}, "
               f"rotation_aware={rotation_aware_weight}, "
-              f"flow_gradient={flow_gradient_weight}")
+              f"flow_gradient={flow_gradient_weight}, "
+              f"curl_smooth={curl_smooth_weight}")
 
         if self.device.type == 'cuda':
             model_restoration.cuda()
@@ -125,9 +129,8 @@ class IterativeDeblurrer:
             # 分块
             input_re, batch_list = window_partitionx(inp, win_size)
 
-            # 推理（HAHA 训练模式返回三元组：outputs, outputs_fil, Kernal_Loss）
-            restored, _, _ = model(input_re)
-            restored = restored[0]
+            # 推理（inference=True：forward 直接返回单张输出张量）
+            restored = model(input_re)
 
             # 反拼接
             restored = window_reversex(restored, win_size, Hx, Wx, batch_list)

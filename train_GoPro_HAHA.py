@@ -70,8 +70,15 @@ class Config:
     # 物理先验约束权重（新增）
     # =============================================
     rigid_smooth_weight = 0.05    # 刚性运动平滑约束权重：L_smooth = Σ sqrt(|∇u|²+ε²) + sqrt(|∇v|²+ε²)
-    rotation_aware_weight = 0.03  # 无中心旋转感知约束权重：L_rotation = mean(clamp(div - curl, min=0))
+    rotation_aware_weight = 0.03  # 无中心旋转感知约束权重（已修复：使用|curl|>|div|，支持顺/逆时针）
     flow_gradient_weight = 0.02   # 流梯度二阶平滑约束权重：L_gradient = Σ sqrt(|∇²u|²+ε²) + sqrt(|∇²v|²+ε²)
+    curl_smooth_weight = 0.04     # 旋度平滑约束权重（风机专用）：刚体旋转 curl=2ω 全场均匀
+    #                               风机调参建议：rigid_smooth_weight=0.02, curl_smooth_weight=0.06
+    #
+    # 训练数据说明：当前使用 GoPro（相机抖动/线性模糊）训练，风机旋转模糊属于不同域。
+    # 若需提升风机去模糊效果，建议：
+    #   1. 在 data augmentation 中加入随机旋转（torchvision.transforms.RandomRotation）
+    #   2. 准备风机旋转模糊数据集（合成或真实）进行微调
 
     # 恢复训练设置
     RESUME = True  # 首次训练设为 False，恢复训练设为 True
@@ -109,6 +116,7 @@ model_restoration = myNet(
     rigid_smooth_weight=args.rigid_smooth_weight,
     rotation_aware_weight=args.rotation_aware_weight,
     flow_gradient_weight=args.flow_gradient_weight,
+    curl_smooth_weight=args.curl_smooth_weight,
 )
 
 # print number of model
@@ -120,6 +128,7 @@ print('Use Deform in Encoder/Decoder:', args.use_deform_in_encoder)
 print('Rigid Smooth Weight:', args.rigid_smooth_weight)
 print('Rotation Aware Weight:', args.rotation_aware_weight)
 print('Flow Gradient Weight:', args.flow_gradient_weight)
+print('Curl Smooth Weight:', args.curl_smooth_weight)
 print('=' * 60)
 print('Total:  ', total_num)
 print('Trainable: ', trainable_num)
@@ -131,6 +140,7 @@ with open(log_dir, "a+") as f:
     f.write('Rigid Smooth Weight: {}\n'.format(args.rigid_smooth_weight))
     f.write('Rotation Aware Weight: {}\n'.format(args.rotation_aware_weight))
     f.write('Flow Gradient Weight: {}\n'.format(args.flow_gradient_weight))
+    f.write('Curl Smooth Weight: {}\n'.format(args.curl_smooth_weight))
     f.write('=' * 60 + '\n')
     f.write('Total: {}\n'.format(total_num))
     f.write('Trainable: {}\n'.format(trainable_num))
